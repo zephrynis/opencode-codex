@@ -141,15 +141,15 @@ test("nonstreaming responses retain thinking and reject unsupported media", asyn
   expect(media.status).toBe(400);
 });
 
-test("context policy overrides generic windows; metadata cannot replace Codex capabilities", async () => {
+test("configured Codex windows reach the legacy catalog without changing native capabilities", async () => {
   const { modelMetadata } = await import("../src/metadata");
   const { configModel } = await import("../src/index");
   for (const context of [400000, 1050000]) {
-    const meta = modelMetadata("gpt-fixture", { "openai/gpt-fixture": { family: "gpt", release_date: "2026-01-01", limit: { context, output: 128000 } } });
-    expect(meta.contextWindow).toBe(272000);
+    const meta = modelMetadata("gpt-fixture", { "openai/gpt-fixture": { family: "gpt", release_date: "2026-01-01", limit: { context: 2000000, output: 128000 } } }, { configuredWindow: context });
+    expect(meta.contextWindow).toBe(context);
     expect(meta.maxOutput).toBe(128000);
     const config = configModel({ ...meta, id: "gpt-fixture", name: "Official CLI name", description: "", nativeInputModalities: ["text", "image"], efforts: ["low"], isDefault: true });
-    expect(config.limit.context).toBe(272000);
+    expect(config.limit.context).toBe(context);
     expect(config.name).toBe("Official CLI name");
     expect(config.modalities.input).toEqual(["text", "image"]);
     expect(config.attachment).toBe(true);
@@ -172,7 +172,8 @@ test("every usage field on the provider wire is zero, and no usage endpoint exis
   expect(events.find(e => e.type === "message_delta").usage.output_tokens).toBe(0);
   expect((await fetch(getProxyBaseUrl() + "/usage", { headers: { "x-api-key": LOCAL_API_KEY } })).status).toBe(404);
   const models = await (await fetch(getProxyBaseUrl() + "/models", { headers: { "x-api-key": LOCAL_API_KEY } })).json() as any;
-  expect(models.data[0].limit.context).toBe(272000);
+  expect(models.data[0].limit.context).toBe(400000);
+  expect(models.data[0].metadata_sources.context).toBe("codex-cli:debug-models:context_window");
 });
 
 test("streams text before completion and separates every tool summary", async () => {

@@ -1,4 +1,4 @@
-import { loadMetadata, modelDisplayName, modelMetadata, type ModelMetadata } from "./metadata.js";
+import { loadCodexContextMetadata, loadMetadata, modelDisplayName, modelMetadata, type CodexContextMetadata, type ModelMetadata } from "./metadata.js";
 import type { ModelListResponse } from "./generated/v2/ModelListResponse.js";
 import { CodexRpc } from "./rpc.js";
 export type CodexModel = { id: string; name: string; efforts: string[]; isDefault: boolean; description: string; nativeInputModalities: string[] } & ModelMetadata;
@@ -13,13 +13,17 @@ export async function refreshModels(cwd: string) {
     try {
       const metadata = loadMetadata();
       await rpc.initialize();
+      const config = await rpc.request("config/read", { includeLayers: false }).catch(() => undefined);
       let cursor: string | undefined;
+      let nativeMetadata: Promise<CodexContextMetadata> | undefined;
       do {
         const result: ModelListResponse = await rpc.request("model/list", { limit: 100, ...(cursor ? { cursor } : {}) });
-        const enrichment = await metadata;
+        // Let model/list refresh Codex's catalog before reading its raw limits.
+        nativeMetadata ||= loadCodexContextMetadata(cwd, config?.config);
+        const [enrichment, nativeContext] = await Promise.all([metadata, nativeMetadata]);
         catalog.push(...result.data.map((m) => {
           const id = m.model || m.id;
-          const meta = modelMetadata(id, enrichment);
+          const meta = modelMetadata(id, enrichment, nativeContext);
           const label = modelDisplayName(id, m.displayName, enrichment);
           return { ...meta, id, name: label.name, sources: { ...meta.sources, name: label.source }, description: m.description || "", nativeInputModalities: m.inputModalities || ["text"], efforts: m.supportedReasoningEfforts.map((e) => e.reasoningEffort), isDefault: m.isDefault };
         }));

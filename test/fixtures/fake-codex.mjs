@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
 import { appendFileSync } from "node:fs";
+if (process.argv[2] === "debug" && process.argv[3] === "models") {
+  if (process.env.OPENCODE_CODEX_TEST_NO_CONTEXT_METADATA) process.exit(1);
+  process.stdout.write(JSON.stringify({ models: [{ slug: "fake-model", context_window: 400000, max_context_window: 1050000 }] }));
+  process.exit(0);
+}
 const send = x => process.stdout.write(JSON.stringify(x) + "\n");
 const notify = (method, params) => send({ method, params: { threadId: "thread-test", ...params } });
 createInterface({ input: process.stdin }).on("line", line => {
@@ -8,6 +13,7 @@ createInterface({ input: process.stdin }).on("line", line => {
   if (process.env.OPENCODE_CODEX_TEST_RPC_LOG) appendFileSync(process.env.OPENCODE_CODEX_TEST_RPC_LOG, JSON.stringify({ cwd: process.cwd(), ...m }) + "\n");
   if (m.id === undefined) return;
   let result = {};
+  if (m.method === "config/read") result = { config: { model_context_window: process.env.OPENCODE_CODEX_TEST_CONTEXT_WINDOW ? Number(process.env.OPENCODE_CODEX_TEST_CONTEXT_WINDOW) : null } };
   if (m.method === "model/list") result = { data: [{ id: "fake-model", model: "fake-model", displayName: "Fake", isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: "low" }] }], nextCursor: null };
   if (m.method === "thread/start" || m.method === "thread/resume") result = { thread: { id: "thread-test" } };
   if (m.method === "turn/start") {

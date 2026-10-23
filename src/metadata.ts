@@ -1,4 +1,12 @@
-export const CODEX_CONTEXT_WINDOW = 272_000;
+import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { promisify } from "node:util";
+
+export const FALLBACK_CONTEXT_WINDOW = 272_000;
+export type CodexContextMetadata = { catalog?: unknown; configuredWindow?: unknown; catalogSource?: string };
+const execute = promisify(execFile);
 export type ModelMetadata = {
   contextWindow: number;
   maxOutput: number;
@@ -32,25 +40,65 @@ export function modelDisplayName(id: string, displayName: string | undefined, pa
   }
   return { name: label || id, source: label ? "codex-app-server:model/list" : "model-id" };
 }
-export function modelMetadata(id: string, payload: unknown): ModelMetadata {
+function tokenLimit(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+export function modelMetadata(id: string, payload: unknown, codex: CodexContextMetadata = {}): ModelMetadata {
   const m = findMetadata(payload, id);
-  const output = m?.limit?.output;
-  const validOutput = typeof output === "number" && Number.isFinite(output) && output > 0;
+  const models = record(codex.catalog)?.models;
+  const native = Array.isArray(models) ? models.find(model => record(model)?.slug === id.replace(/^openai\//, "")) : undefined;
+  const configuredWindow = tokenLimit(codex.configuredWindow);
+  // Codex's working window can be smaller than the catalog's maximum or the
+  // model's generic API window. OpenCode should describe the Codex runtime.
+  const nativeWindow = tokenLimit(record(native)?.context_window);
+  const contextWindow = configuredWindow ?? nativeWindow ?? FALLBACK_CONTEXT_WINDOW;
+  const output = tokenLimit(m?.limit?.output);
   return {
-    // Explicit adapter policy wins over generic API windows such as 1M/400k.
-    contextWindow: CODEX_CONTEXT_WINDOW,
-    maxOutput: validOutput ? Math.min(output, CODEX_CONTEXT_WINDOW) : 32_768,
+    contextWindow,
+    maxOutput: Math.min(output ?? 32_768, contextWindow),
     ...(typeof m?.family === "string" ? { family: m.family } : {}),
     ...(typeof m?.release_date === "string" ? { releaseDate: m.release_date } : {}),
     ...(typeof m?.last_updated === "string" ? { lastUpdated: m.last_updated } : {}),
     sources: {
-      context: "adapter-policy:272000",
-      output: validOutput ? "models.dev:exact-openai-id" : "adapter-fallback:32768",
+      context: configuredWindow ? "codex-app-server:config/read:model_context_window"
+        : nativeWindow ? `${codex.catalogSource || "codex-catalog"}:context_window` : "adapter-fallback:272000",
+      output: output ? "models.dev:exact-openai-id" : "adapter-fallback:32768",
       catalog: "codex-app-server:model/list",
       ...(m ? { descriptive: "models.dev:exact-openai-id" } : {}),
     },
   };
 }
+
+export async function loadCodexContextMetadata(cwd: string, config?: unknown): Promise<CodexContextMetadata> {
+  const settings = record(config);
+  const configuredWindow = settings?.model_context_window;
+  if (tokenLimit(configuredWindow)) return { configuredWindow };
+  try {
+    // model/list only exposes picker metadata. This read-only command uses
+    // Codex's configured catalog and cache, including CODEX_HOME overrides.
+    const { stdout } = await execute(process.env.OPENCODE_CODEX_BIN || "codex", ["debug", "models"], {
+      cwd, timeout: 10_000, maxBuffer: 16 * 1024 * 1024,
+    });
+    return { configuredWindow, catalog: JSON.parse(stdout), catalogSource: "codex-cli:debug-models" };
+  } catch {
+    // Older CLIs may lack debug models. model/list has already refreshed the
+    // cache; an explicitly configured catalog takes precedence over that cache.
+    const custom = settings?.model_catalog_json;
+    const path = typeof custom === "string" && custom
+      ? resolve(cwd, custom) : join(process.env.CODEX_HOME || join(homedir(), ".codex"), "models_cache.json");
+    try {
+      return {
+        configuredWindow, catalog: JSON.parse(await readFile(path, "utf8")),
+        catalogSource: typeof custom === "string" && custom ? "codex-config:model_catalog_json" : "codex-cache:models_cache.json",
+      };
+    } catch {
+      // Missing optional metadata must not prevent the provider from loading.
+      return { configuredWindow };
+    }
+  }
+}
+
 export async function loadMetadata(): Promise<unknown> {
   if (process.env.OPENCODE_CODEX_METADATA === "off") return {};
   try {

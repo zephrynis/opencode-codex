@@ -13,9 +13,9 @@ process.env.OPENCODE_CODEX_BIN = resolve("test/fixtures/fake-codex.mjs");
 afterAll(async () => { await stopProxy(); delete process.env.OPENCODE_CODEX_BIN; });
 
 test("v2 models expose native capabilities and only supported effort variants", () => {
-  const model = providerModel({ ...modelMetadata("fake", undefined), id: "fake", name: "Fake", description: "", efforts: ["low", "high"], nativeInputModalities: ["text", "image"], isDefault: true });
+  const model = providerModel({ ...modelMetadata("fake", undefined, { configuredWindow: 750000 }), id: "fake", name: "Fake", description: "", efforts: ["low", "high"], nativeInputModalities: ["text", "image"], isDefault: true });
   expect(model.capabilities).toEqual({ tools: false, input: ["text", "image"], output: ["text"] });
-  expect(model.limit.context).toBe(272000);
+  expect(model.limit.context).toBe(750000);
   expect(model.variants).toEqual([
     { id: "low", headers: { [EFFORT_HEADER]: "low" } },
     { id: "high", headers: { [EFFORT_HEADER]: "high" } },
@@ -50,6 +50,7 @@ test("v2 registers a replayable provider and routes primary and auxiliary reques
     expect(providers[0].info).toMatchObject({ id: "codex", activation: "enabled", package: "@opencode/ai/providers/anthropic-compatible" });
     expect(providers[0].info.settings?.baseURL).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/v1$/);
     expect(providers[0].models[0].id).toBe("fake-model");
+    expect(providers[0].models[0].limit.context).toBe(400000);
 
     for (const kind of ["primary", "title", "compaction", "generate"] as const) {
       const event = { sessionID: "session", model: { providerID: "codex", id: "fake-model", variant: "low" }, agent: "plan", kind, headers: {} } as unknown as SessionHooks["model.request"];
