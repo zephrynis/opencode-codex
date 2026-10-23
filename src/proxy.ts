@@ -18,6 +18,7 @@ import { buildCodexInput, isUtility, type OpenAIMessage } from "./prompt.js";
 import { runInSession, sessionKey } from "./session.js";
 
 import { log } from "./log.js";
+import { getUserInputHandler } from "./questions.js";
 
 type AnthropicMessageRequest = {
   model?: unknown;
@@ -211,6 +212,7 @@ async function handleMessages(request: Request, body: AnthropicMessageRequest): 
         requestId: readHeader(request, "x-opencode-codex-message"),
         readOnly: readHeader(request, "x-opencode-codex-mode") === "plan",
         signal: abort.signal,
+        onUserInput: getUserInputHandler(directory, sessionId, readHeader(request, "x-opencode-codex-agent")),
       });
 
   if (body.stream !== true) {

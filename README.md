@@ -51,8 +51,9 @@ Codex reads its existing configuration and credentials. The v2 provider is enabl
 - Completed provider retries replay the cached response. Interrupted or uncertain requests cannot automatically run again. Send a new message to continue. Response caches are limited to 2 MB; larger responses also require a new message instead of automatic replay.
 - Turns in a conversation run sequentially. A file lock prevents another OpenCode process from editing through the same thread concurrently.
 - Stop/disconnect sends `turn/interrupt`, then closes the worker.
+- On OpenCode v2, Codex `request_user_input` calls appear as native question forms, including OpenChamber's question cards. Multiple questions, choices, and free-text answers return to the same running Codex turn. Waiting for an answer pauses the adapter's stall timer. Dismissing a question or stopping the session interrupts the turn and clears pending forms. The native `question` tool must be enabled; its permission checks apply to these questions.
 - Title and summary requests use separate ephemeral, read-only threads.
-- In v2, title, compaction, and transient generation requests are routed to ephemeral, read-only threads using the request kind. Normal requests retain the session's Codex thread. V2 retries use a hash of the input transcript because request hooks do not expose a message ID.
+- In v2, title, compaction, and transient generation requests are routed to ephemeral, read-only threads using the request kind. Normal requests retain the session's Codex thread. V2 retries use the persisted user-message ID read from session context, with a transcript-hash fallback when no message ID is available.
 - OpenCode's plan agent uses Codex's read-only sandbox. Normal coding uses `danger-full-access` by default.
 - Codex retains its native instructions and project configuration. OpenCode's provider tool instructions are not forwarded. Custom OpenCode system prompts are not currently translated; put persistent coding instructions in Codex's configuration or project instructions.
 - Provider usage is zero so OpenCode does not use Codex's token usage to trigger its own compaction. Real token counts are never returned through the proxy, and there is no usage endpoint. The Anthropic protocol carries only required zero-valued usage fields, including its final streaming event. Context windows in OpenCode reflect Codex's configuration and per-model working windows.
@@ -74,7 +75,9 @@ The local models endpoint includes per-field source labels. The provider adverti
 
 ## Permissions
 
-The adapter sets Codex's approval policy to `never`. Codex executes operations allowed by the selected sandbox and refuses operations requiring approval. Unexpected command/file approval requests are declined; permission-extension requests receive no added permissions. Interactive questionnaires are unsupported, and the adapter instructs Codex to ask ordinary chat questions instead.
+The adapter sets Codex's approval policy to `never`. Codex executes operations allowed by the selected sandbox and refuses operations requiring approval. Unexpected command/file approval requests are declined; permission-extension requests receive no added permissions. The v2 question bridge only handles questionnaires. It enables Codex's `default_mode_request_user_input` feature for that worker, without changing the user's config file. Secret/password questionnaires are rejected because OpenCode's question tool has no secret-input field. Auxiliary requests and the legacy v1 entrypoint use ordinary chat questions instead.
+
+Question forms remain available while the OpenCode backend is running, including when an OpenChamber browser reconnects. Backend shutdown/reload cancels pending questions; they are not restored across server restarts.
 
 This version does not bridge OpenCode permission dialogs to Codex. OpenCode tool permissions do not govern Codex's internal tools.
 
@@ -99,16 +102,17 @@ Session caches contain assistant output and tool activity. They use owner-only f
 ```sh
 npm run check
 npm run test:cli
+npm run test:forms
 npm run test:live
 npm run test:e2e
 npm run test:package
 ```
 
-The deterministic tests use a fake JSON-RPC process and cover v2 provider registration, metadata, request routing, default variants, and cleanup. `test:cli` runs the installed OpenCode v2 CLI against that fake backend, checking streamed text/activity, plan mode, reasoning effort, and session resume across processes without model usage. The live test uses the installed Codex to edit and read a temporary file, then resumes the thread to verify memory. The E2E test loads this plugin through the installed OpenCode v2 CLI, verifies file creation, reasoning blocks and absence of host tool calls, then starts another OpenCode process to resume the same conversation. Zero provider usage is verified by the deterministic proxy tests. Live tests use the catalog default model unless `OPENCODE_CODEX_TEST_MODEL` is set.
+The deterministic tests use a fake JSON-RPC process and cover v2 provider registration, metadata, request routing, default variants, question answers, cancellation, and cleanup. `test:cli` runs the installed OpenCode v2 CLI against that fake backend, checking streamed text/activity, plan mode, reasoning effort, and session resume across processes without model usage. `test:forms` starts an isolated real OpenCode server and uses its forms API to answer, dismiss, and stop Codex questions, including questions on resumed threads. The live test uses the installed Codex to edit and read a temporary file, then resumes the thread to verify memory. The E2E test loads this plugin through the installed OpenCode v2 CLI, verifies file creation, reasoning blocks and absence of host tool calls, then starts another OpenCode process to resume the same conversation. Zero provider usage is verified by the deterministic proxy tests. Live tests use the catalog default model unless `OPENCODE_CODEX_TEST_MODEL` is set.
 
 Live tests use your existing Codex authentication and consume model usage. They remove their temporary workspaces and adapter mappings afterward; Codex and OpenCode retain their normal conversation records.
 
-Request/model types under `src/generated` were generated by Codex CLI 0.153.4 using `codex app-server generate-ts`. App-server remains experimental. Test a new Codex version before adopting it.
+Request/model types under `src/generated` were generated by Codex CLI 0.153.4 using `codex app-server generate-ts`; the `ToolRequestUserInput*` types were generated by CLI 0.159.2. App-server remains experimental. Test a new Codex version before adopting it.
 
 ## References
 
@@ -118,6 +122,6 @@ Request/model types under `src/generated` were generated by Codex CLI 0.153.4 us
 
 The HTTP/SSE adapter was adapted from the sibling opencode-commandcode-cli project. The session/protocol design also follows the sibling opencode-agy wrapper.
 
-The package test installs an npm tarball in a clean temporary directory and runs the deterministic OpenCode v2 CLI test against that installed copy. The CLI tests use standalone servers and isolated OpenCode configuration and data directories.
+The package test installs an npm tarball in a clean temporary directory and runs the deterministic OpenCode v2 CLI and forms tests against that installed copy. These tests use isolated OpenCode servers, configuration, and data directories.
 
 The v2 port follows the [OpenCode plugin migration guide](https://opencode.ai/v2/docs/build/plugins/migrate-v1/), using `@opencode/plugin`, provider transforms, scoped request hooks, and setup cleanup.

@@ -27,6 +27,7 @@
     "test:live": "bun test ./test/live.ts",
     "test:e2e": "bun test ./test/e2e.ts",
     "test:cli": "bun test ./test/cli.ts",
+    "test:forms": "bun test ./test/forms.ts",
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "prepublishOnly": "npm run check",
     "prepack": "npm run build",

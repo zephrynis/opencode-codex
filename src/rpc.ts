@@ -1,11 +1,14 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
+import type { UserInputHandler } from "./questions.js";
 
 export class CodexRpc {
   private child: ChildProcessWithoutNullStreams;
   private nextId = 0;
   private pending = new Map<number, { resolve: (x: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   listeners = new Set<(method: string, params: any) => void>();
+  onUserInput?: UserInputHandler;
+  private userInput = new Map<string | number, AbortController>();
   closed = false;
   constructor(cwd: string, executable = process.env.OPENCODE_CODEX_BIN || "codex", args = ["app-server", "--listen", "stdio://"]) {
     this.child = spawn(executable, args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
@@ -23,7 +26,14 @@ export class CodexRpc {
   }
   private receive(msg: any) {
     if (msg.method && msg.id !== undefined) {
-      // V1 uses a noninteractive policy. Never leave an unexpected approval hanging.
+      if (msg.method === "item/tool/requestUserInput" && this.onUserInput) {
+        if (this.userInput.has(msg.id)) return;
+        const controller = new AbortController();
+        this.userInput.set(msg.id, controller);
+        void this.answerUserInput(msg, controller);
+        return;
+      }
+      // Keep the noninteractive approval policy; only questionnaires are bridged.
       if (msg.method === "item/permissions/requestApproval") this.send({ id: msg.id, result: { permissions: {}, scope: "turn" } });
       else if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval"].includes(msg.method)) this.send({ id: msg.id, result: { decision: "decline" } });
       else this.send({ id: msg.id, error: { code: -32601, message: "Interactive requests are not supported by this provider. Use a normal chat question." } });
@@ -34,8 +44,28 @@ export class CodexRpc {
       this.pending.delete(msg.id); clearTimeout(p.timer);
       if (msg.error) p.reject(new Error(msg.error.message)); else p.resolve(msg.result);
     } else if (msg.method) {
+      if (msg.method === "serverRequest/resolved") {
+        this.userInput.get(msg.params?.requestId)?.abort();
+        this.userInput.delete(msg.params?.requestId);
+      }
+      if (msg.method === "turn/completed") this.cancelUserInput();
       for (const listener of this.listeners) listener(msg.method, msg.params);
     }
+  }
+  private async answerUserInput(msg: { id: string | number; params: any }, controller: AbortController) {
+    try {
+      const result = await this.onUserInput!(msg.params, controller.signal);
+      if (!this.closed && !controller.signal.aborted) this.send({ id: msg.id, result });
+    } catch {
+      if (!this.closed && !controller.signal.aborted) {
+        this.send({ id: msg.id, error: { code: -32000, message: "The interactive question was dismissed or could not be completed." } });
+        for (const listener of this.listeners) listener("adapter/questionFailed", { threadId: msg.params.threadId });
+      }
+    } finally { this.userInput.delete(msg.id); }
+  }
+  cancelUserInput() {
+    for (const controller of this.userInput.values()) controller.abort();
+    this.userInput.clear();
   }
   request(method: string, params: unknown = {}): Promise<any> {
     return new Promise((resolve, reject) => {
@@ -45,13 +75,15 @@ export class CodexRpc {
       try { this.send({ id, method, params }); } catch (e) { clearTimeout(timer); this.pending.delete(id); reject(e); }
     });
   }
-  async initialize() {
-    await this.request("initialize", { clientInfo: { name: "opencode_codex", title: "OpenCode Codex", version: "0.1.4" } });
+  async initialize(experimentalApi = false) {
+    await this.request("initialize", { clientInfo: { name: "opencode_codex", title: "OpenCode Codex", version: "0.1.4" },
+      ...(experimentalApi ? { capabilities: { experimentalApi: true } } : {}) });
     this.send({ method: "initialized" });
   }
   private fail(error: Error) {
     if (this.closed) return;
     this.closed = true;
+    this.cancelUserInput();
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(error); }
     this.pending.clear();
     for (const listener of this.listeners) listener("adapter/error", { message: error.message });

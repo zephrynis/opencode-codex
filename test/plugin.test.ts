@@ -31,6 +31,7 @@ test("v2 registers a replayable provider and routes primary and auxiliary reques
     provider: { transform: async (callback: typeof transform) => { transform = callback; } },
     session: {
       get: async () => ({ location: { directory: resolve("test") } }),
+      context: async () => [{ id: "user-message", type: "user" }, { id: "retry-message", type: "assistant" }],
       hook: async (name: string, callback: typeof request, options: unknown) => {
         expect(name).toBe("model.request");
         expect(options).toEqual({ providerID: "codex" });
@@ -57,13 +58,14 @@ test("v2 registers a replayable provider and routes primary and auxiliary reques
       await request(event);
       expect(event.headers).toMatchObject({ [MODEL_HEADER]: "fake-model", [SESSION_HEADER]: "session", [DIRECTORY_HEADER]: resolve("test"), [EFFORT_HEADER]: "low", "x-opencode-codex-mode": "plan" });
       expect(event.headers[REQUEST_KIND_HEADER]).toBe(kind === "primary" ? undefined : kind === "title" ? "title" : "summary");
+      expect(event.headers["x-opencode-codex-message"]).toBe(kind === "primary" ? "user-message" : undefined);
     }
     for (const variant of [undefined, "default"]) {
       const event = { sessionID: "session", model: { providerID: "codex", id: "fake-model", variant }, agent: "build", kind: "primary", headers: {} } as unknown as SessionHooks["model.request"];
       await request(event);
       expect(event.headers[EFFORT_HEADER]).toBeUndefined();
       expect(event.headers["x-opencode-codex-mode"]).toBeUndefined();
-      expect(event.headers["x-opencode-codex-message"]).toBeUndefined();
+      expect(event.headers["x-opencode-codex-message"]).toBe("user-message");
     }
   } finally { await cleanup?.(); }
   expect(getProxyPort()).toBeNull();

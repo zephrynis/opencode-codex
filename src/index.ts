@@ -3,6 +3,7 @@ import { CodexPlugin as legacyPlugin } from "./legacy.js";
 import { refreshModels, type CodexModel } from "./models.js";
 import { getProxyBaseUrl, startProxy, stopProxy } from "./proxy.js";
 import { DIRECTORY_HEADER, EFFORT_HEADER, LOCAL_API_KEY, MODEL_HEADER, PROVIDER_ID, REQUEST_KIND_HEADER, SESSION_HEADER } from "./constants.js";
+import { nativeQuestionBridge, registerQuestionBridge } from "./questions.js";
 
 export { configModel } from "./legacy.js";
 
@@ -33,8 +34,10 @@ export const CodexPlugin = {
     id: "opencode-codex",
     async setup(ctx) {
       const directory = ctx.location.directory;
+      let disposeQuestions: (() => void) | undefined;
       try {
         await startProxy(directory);
+        disposeQuestions = registerQuestionBridge(directory, nativeQuestionBridge(ctx));
         const models = (await refreshModels(directory)).map(providerModel);
         await ctx.provider.transform(editor => {
           editor.add({
@@ -54,17 +57,23 @@ export const CodexPlugin = {
           event.headers[MODEL_HEADER] = event.model.id;
           event.headers[DIRECTORY_HEADER] = session.location.directory;
           event.headers[SESSION_HEADER] = event.sessionID;
+          event.headers["x-opencode-codex-agent"] = event.agent;
+          if (event.kind === "primary") {
+            const history = await ctx.session.context({ sessionID: event.sessionID });
+            const message = [...history].reverse().find(message => message.type === "user");
+            if (message) event.headers["x-opencode-codex-message"] = message.id;
+          }
           if (event.model.variant && event.model.variant !== "default") event.headers[EFFORT_HEADER] = event.model.variant;
           if (event.agent === "plan") event.headers["x-opencode-codex-mode"] = "plan";
-          // V2 has no message ID on request hooks. The proxy hashes the input
-          // transcript to identify retries when this header is absent.
+          // Auxiliary flows never share the durable Codex thread.
           if (event.kind !== "primary") {
             event.headers[REQUEST_KIND_HEADER] = event.kind === "title" ? "title" : "summary";
           }
         }, { providerID: PROVIDER_ID });
 
-        return () => stopProxy(directory);
+        return async () => { disposeQuestions?.(); await stopProxy(directory); };
       } catch (error) {
+        disposeQuestions?.();
         await stopProxy(directory);
         throw error;
       }

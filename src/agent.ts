@@ -3,14 +3,16 @@ import type { ThreadStartParams } from "./generated/v2/ThreadStartParams.js";
 import type { TurnStartParams } from "./generated/v2/TurnStartParams.js";
 import type { UserInput } from "./generated/v2/UserInput.js";
 import { CodexRpc } from "./rpc.js";
+import type { UserInputHandler } from "./questions.js";
 export type CodexUsage = { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd?: number };
 export type CodexEvent =
  | { kind: "text" | "reasoning" | "activity"; text: string }
  | { kind: "error"; text: string }
  | { kind: "finish"; usage: CodexUsage; finishReason: string; sessionId?: string };
-export type RunOptions = { cwd: string; prompt: string; input?: UserInput[]; model: string; effort?: string; signal?: AbortSignal; noSession?: boolean; readOnly?: boolean; threadId?: string; onThread?: (id: string) => Promise<void>; onActivity?: () => void };
+export type RunOptions = { cwd: string; prompt: string; input?: UserInput[]; model: string; effort?: string; signal?: AbortSignal; noSession?: boolean; readOnly?: boolean; threadId?: string; onThread?: (id: string) => Promise<void>; onActivity?: () => void; onUserInput?: UserInputHandler };
 export async function* streamCodex(options: RunOptions): AsyncGenerator<CodexEvent> {
   const rpc = new CodexRpc(options.cwd);
+  const interactive = !!options.onUserInput && !options.noSession;
   const queue: CodexEvent[] = [];
   let wake: (() => void) | undefined;
   let threadId = options.threadId;
@@ -22,6 +24,7 @@ export async function* streamCodex(options: RunOptions): AsyncGenerator<CodexEve
   let usage: CodexUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   const push = (e: CodexEvent) => { queue.push(e); wake?.(); };
   const interrupt = () => {
+    rpc.cancelUserInput();
     if (threadId && turnId) interruption ||= rpc.request("turn/interrupt", { threadId, turnId }).catch(() => {});
     else rpc.close();
     finished = true; wake?.();
@@ -29,8 +32,17 @@ export async function* streamCodex(options: RunOptions): AsyncGenerator<CodexEve
   const configuredTimeout = Number(process.env.OPENCODE_CODEX_STALL_MS || 600000);
   const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : 600000;
   let lastActivity = Date.now();
+  let pendingQuestions = 0;
+  if (interactive) rpc.onUserInput = async (request, signal) => {
+    if (request.threadId !== threadId) throw new Error("Question belongs to another Codex thread");
+    pendingQuestions++;
+    push({ kind: "activity", text: "[Codex Question: Waiting for your answer]\n" });
+    try {
+      return await options.onUserInput!(request, options.signal ? AbortSignal.any([signal, options.signal]) : signal);
+    } finally { pendingQuestions--; lastActivity = Date.now(); }
+  };
   const timer = setInterval(() => {
-    if (Date.now() - lastActivity > timeoutMs) { push({ kind: "error", text: "Codex stopped sending activity" }); interrupt(); }
+    if (!pendingQuestions && Date.now() - lastActivity > timeoutMs) { push({ kind: "error", text: "Codex stopped sending activity" }); interrupt(); }
   }, Math.min(timeoutMs, 5000));
   rpc.listeners.add((method, p) => {
     if (method === "adapter/error") { push({ kind: "error", text: p.message }); finished = true; return; }
@@ -57,6 +69,10 @@ export async function* streamCodex(options: RunOptions): AsyncGenerator<CodexEve
       }
     }
     if (method === "adapter/requestDeclined") push({ kind: "activity", text: `Codex requested unsupported interaction: ${p.method}. Declined.\n` });
+    if (method === "adapter/questionFailed") {
+      push({ kind: "error", text: "The question was dismissed or could not be completed. Send a message to continue." });
+      interrupt();
+    }
     if (method === "thread/tokenUsage/updated") {
       const u = p.tokenUsage.last;
       usage = { inputTokens: Math.max(0, u.inputTokens - u.cachedInputTokens), outputTokens: u.outputTokens, cacheReadTokens: u.cachedInputTokens, cacheWriteTokens: 0 };
@@ -71,13 +87,17 @@ export async function* streamCodex(options: RunOptions): AsyncGenerator<CodexEve
   options.signal?.addEventListener("abort", interrupt, { once: true });
   try {
     if (options.signal?.aborted) return;
-    await rpc.initialize();
+    await rpc.initialize(interactive);
     const sandbox = options.noSession || options.readOnly ? "read-only" : process.env.OPENCODE_CODEX_SANDBOX || "danger-full-access";
     if (!["read-only", "workspace-write", "danger-full-access"].includes(sandbox)) throw new Error("Invalid OPENCODE_CODEX_SANDBOX");
-    const params: ThreadStartParams = { cwd: options.cwd, model: options.model, approvalPolicy: "never", sandbox: sandbox as ThreadStartParams["sandbox"] };
+    const developerInstructions = "You are running inside OpenCode. Use your own Codex tools to complete the user's task. Tool activity is displayed by the host. " + (interactive
+      ? "Use request_user_input when you need to ask the user a question or offer choices. The host displays interactive question forms and returns the user's answers. Do not request secrets through question forms."
+      : "Ask any questions as ordinary assistant text. The host cannot answer interactive tool questionnaires.");
+    const params: ThreadStartParams = { cwd: options.cwd, model: options.model, approvalPolicy: "never", sandbox: sandbox as ThreadStartParams["sandbox"],
+      ...(interactive ? { config: { "features.default_mode_request_user_input": true }, developerInstructions } : {}) };
     const result = threadId
       ? await rpc.request("thread/resume", { ...params, threadId })
-      : await rpc.request("thread/start", { ...params, ephemeral: !!options.noSession, developerInstructions: "You are running inside OpenCode. Use your own Codex tools to complete the user's task. Tool activity is displayed by the host. Ask any questions as ordinary assistant text. The host cannot answer interactive tool questionnaires." });
+      : await rpc.request("thread/start", { ...params, ephemeral: !!options.noSession, developerInstructions });
     threadId = result.thread.id;
     await options.onThread?.(threadId!);
     if (options.signal?.aborted) return;
