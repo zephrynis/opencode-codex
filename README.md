@@ -10,14 +10,14 @@ Codex tool activity appears as ordered reasoning/status blocks. OpenCode does no
 
 ## Install
 
-Requires Bun, OpenCode, and an installed, authenticated Codex CLI. Tested with OpenCode 1.18.29, Codex CLI 0.153.4, and Bun 1.4.1.
+Requires Bun, OpenCode 2.x (2.0.26 or newer), and an installed, authenticated Codex CLI. Compatibility checks pass on OpenCode 2.0.26 and 2.1.4 with Bun 1.4.4 using a fake Codex backend. The legacy OpenCode 1.18.29 entrypoint is also retained and smoke-tested. The Codex protocol targets CLI 0.153.4.
 
 Authenticate Codex once with `codex login`, then add the npm package to your OpenCode configuration:
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@rasyid_rafi/opencode-codex@0.1.4"]
+  "plugins": ["@rasyid_rafi/opencode-codex"]
 }
 ```
 
@@ -30,16 +30,19 @@ npm install
 npm run build
 ```
 
-This checkout uses the published npm package by default. To test local changes interactively, replace the plugin entry in `opencode.json` with `./opencode-codex.js` after building. Other projects can reference the absolute path to that entrypoint.
+This checkout's `opencode.json` loads the local plugin directory (`"plugins": ["."]`) after building. Other projects can reference the absolute path to this directory. OpenCode v2 configured local plugins must be directories; a path to `opencode-codex.js` is skipped.
+
+OpenCode v1.18.29 users should keep the singular `"plugin"` configuration key and can continue using the `opencode-codex.js` entrypoint. Both versions share the Codex proxy and session storage.
 
 Restart OpenCode, select the **Codex** provider, and choose a model. The plugin reads the model list and supported reasoning efforts from your installed Codex app-server. To inspect the available IDs:
 
 ```sh
-opencode models codex
+opencode models
 opencode run --model codex/YOUR_MODEL_ID --thinking "Explain this repository"
+opencode run --model codex/YOUR_MODEL_ID#high "Use high reasoning effort"
 ```
 
-Codex reads its existing configuration and credentials. The plugin only stores a fixed, non-secret local provider marker in OpenCode. It does not copy OAuth tokens or call the model API directly.
+Codex reads its existing configuration and credentials. The v2 provider is enabled automatically with a fixed, non-secret local API marker; no OpenCode credential setup is needed. The legacy entrypoint stores that marker in OpenCode. The plugin does not copy OAuth tokens or call the model API directly.
 
 ## Behavior
 
@@ -49,6 +52,7 @@ Codex reads its existing configuration and credentials. The plugin only stores a
 - Turns in a conversation run sequentially. A file lock prevents another OpenCode process from editing through the same thread concurrently.
 - Stop/disconnect sends `turn/interrupt`, then closes the worker.
 - Title and summary requests use separate ephemeral, read-only threads.
+- In v2, title, compaction, and transient generation requests are routed to ephemeral, read-only threads using the request kind. Normal requests retain the session's Codex thread. V2 retries use a hash of the input transcript because request hooks do not expose a message ID.
 - OpenCode's plan agent uses Codex's read-only sandbox. Normal coding uses `danger-full-access` by default.
 - Codex retains its native instructions and project configuration. OpenCode's provider tool instructions are not forwarded. Custom OpenCode system prompts are not currently translated; put persistent coding instructions in Codex's configuration or project instructions.
 - Provider usage is zero so OpenCode does not use Codex's token usage to trigger its own compaction. Real token counts are never returned through the proxy, and there is no usage endpoint. The Anthropic protocol carries only required zero-valued usage fields, including its final streaming event. Every model advertises a 272,000-token context window.
@@ -66,7 +70,7 @@ Metadata precedence is field-specific:
 3. Exact OpenAI model records from Models.dev supply family, release date, update date, and output limit where available. These are generic model metadata, not evidence of a different Codex context window.
 4. Missing output metadata uses a conservative 32,768-token display fallback. Missing descriptive fields stay absent. Metadata fetch failures do not block Codex.
 
-The local models endpoint includes per-field source labels. The provider still advertises text-only input and no host tool calling because those are adapter capabilities. Set `OPENCODE_CODEX_METADATA=off` to disable the optional Models.dev fetch.
+The local models endpoint includes per-field source labels. The provider advertises text and supported image input, with no host tool calling. V2 exposes only the reasoning efforts reported by Codex; its `default` variant leaves effort selection to Codex. Set `OPENCODE_CODEX_METADATA=off` to disable the optional Models.dev fetch.
 
 ## Permissions
 
@@ -94,12 +98,13 @@ Session caches contain assistant output and tool activity. They use owner-only f
 
 ```sh
 npm run check
+npm run test:cli
 npm run test:live
 npm run test:e2e
 npm run test:package
 ```
 
-The deterministic tests use a fake JSON-RPC process. The live test uses the installed Codex to edit and read a temporary file, then resumes the thread to verify memory. The E2E test loads this plugin through the installed OpenCode CLI, verifies file creation and reasoning blocks, checks zero provider usage and absence of host tool calls, then starts another OpenCode process to resume the same conversation. Live tests use the catalog default model unless `OPENCODE_CODEX_TEST_MODEL` is set.
+The deterministic tests use a fake JSON-RPC process and cover v2 provider registration, metadata, request routing, default variants, and cleanup. `test:cli` runs the installed OpenCode v2 CLI against that fake backend, checking streamed text/activity, plan mode, reasoning effort, and session resume across processes without model usage. The live test uses the installed Codex to edit and read a temporary file, then resumes the thread to verify memory. The E2E test loads this plugin through the installed OpenCode v2 CLI, verifies file creation, reasoning blocks and absence of host tool calls, then starts another OpenCode process to resume the same conversation. Zero provider usage is verified by the deterministic proxy tests. Live tests use the catalog default model unless `OPENCODE_CODEX_TEST_MODEL` is set.
 
 Live tests use your existing Codex authentication and consume model usage. They remove their temporary workspaces and adapter mappings afterward; Codex and OpenCode retain their normal conversation records.
 
@@ -113,4 +118,6 @@ Request/model types under `src/generated` were generated by Codex CLI 0.153.4 us
 
 The HTTP/SSE adapter was adapted from the sibling opencode-commandcode-cli project. The session/protocol design also follows the sibling opencode-agy wrapper.
 
-The package test installs an npm tarball in a clean temporary directory and runs the OpenCode E2E test against that installed copy.
+The package test installs an npm tarball in a clean temporary directory and runs the deterministic OpenCode v2 CLI test against that installed copy. The CLI tests use standalone servers and isolated OpenCode configuration and data directories.
+
+The v2 port follows the [OpenCode plugin migration guide](https://opencode.ai/v2/docs/build/plugins/migrate-v1/), using `@opencode/plugin`, provider transforms, scoped request hooks, and setup cleanup.

@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
+import { appendFileSync } from "node:fs";
 const send = x => process.stdout.write(JSON.stringify(x) + "\n");
 const notify = (method, params) => send({ method, params: { threadId: "thread-test", ...params } });
 createInterface({ input: process.stdin }).on("line", line => {
   const m = JSON.parse(line);
+  if (process.env.OPENCODE_CODEX_TEST_RPC_LOG) appendFileSync(process.env.OPENCODE_CODEX_TEST_RPC_LOG, JSON.stringify({ cwd: process.cwd(), ...m }) + "\n");
   if (m.id === undefined) return;
   let result = {};
   if (m.method === "model/list") result = { data: [{ id: "fake-model", model: "fake-model", displayName: "Fake", isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: "low" }] }], nextCursor: null };

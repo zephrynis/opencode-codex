@@ -1,73 +1,77 @@
-import { CodexRpc } from "./rpc.js";
-import type { Plugin } from "@opencode-ai/plugin";
+import { Model, Plugin, Provider } from "@opencode/plugin";
+import { CodexPlugin as legacyPlugin } from "./legacy.js";
 import { refreshModels, type CodexModel } from "./models.js";
-import { startProxy, stopProxy, getProxyBaseUrl } from "./proxy.js";
-import { PROVIDER_ID, LOCAL_API_KEY, ANTHROPIC_NPM, MODEL_HEADER, EFFORT_HEADER, DIRECTORY_HEADER, SESSION_HEADER, REQUEST_KIND_HEADER } from "./constants.js";
-function variants(m: CodexModel) {
-  return Object.fromEntries([...new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", ...m.efforts])].map(e => [e, m.efforts.includes(e) ? { effort: e } : { disabled: true }]));
-}
-export function configModel(m: CodexModel) {
-  const inputModalities = ["text", ...(m.nativeInputModalities.some(modality => modality.toLowerCase() === "image") ? ["image"] : [])];
-  const supportsImage = inputModalities.includes("image");
-  return { name: m.name, family: m.family, release_date: m.releaseDate || "", reasoning: m.efforts.length > 0, interleaved: true, temperature: false, tool_call: false, attachment: supportsImage,
-    modalities: { input: inputModalities, output: ["text"] }, limit: { context: m.contextWindow, output: m.maxOutput },
-    options: { includeUsage: false }, variants: variants(m) };
-}
-export const CodexPlugin: Plugin = async input => {
+import { getProxyBaseUrl, startProxy, stopProxy } from "./proxy.js";
+import { DIRECTORY_HEADER, EFFORT_HEADER, LOCAL_API_KEY, MODEL_HEADER, PROVIDER_ID, REQUEST_KIND_HEADER, SESSION_HEADER } from "./constants.js";
+
+export { configModel } from "./legacy.js";
+
+const providerID = Provider.ID.make(PROVIDER_ID);
+
+export function providerModel(model: CodexModel): Model.Info {
+  const released = Date.parse(model.releaseDate || "");
   return {
-    async config(config) {
-      await startProxy(input.directory);
-      const models = await refreshModels(input.directory);
-      config.provider ||= {};
-      const existing = config.provider[PROVIDER_ID];
-      config.provider[PROVIDER_ID] = {
-        ...existing, name: "Codex", npm: ANTHROPIC_NPM,
-        options: { ...existing?.options, baseURL: getProxyBaseUrl(), apiKey: LOCAL_API_KEY, includeUsage: false },
-        models: Object.fromEntries(models.map(m => [m.id, configModel(m)])),
-      } as any;
-      await input.client.auth.set({ path: { id: PROVIDER_ID }, body: { type: "api", key: LOCAL_API_KEY } });
+    ...Model.Info.default(providerID, Model.ID.make(model.id)),
+    name: model.name,
+    ...(model.family ? { family: Model.Family.make(model.family) } : {}),
+    capabilities: {
+      tools: false,
+      input: ["text", ...(model.nativeInputModalities.some(m => m.toLowerCase() === "image") ? ["image"] : [])],
+      output: ["text"],
     },
-    "chat.headers": async (hook, output) => {
-      if (hook.model.providerID !== PROVIDER_ID) return;
-      output.headers[MODEL_HEADER] = hook.model.id;
-      output.headers[DIRECTORY_HEADER] = input.directory;
-      output.headers[SESSION_HEADER] = hook.sessionID;
-      output.headers["x-opencode-codex-message"] = hook.message.id;
-      if (hook.agent === "plan") output.headers["x-opencode-codex-mode"] = "plan";
-      const variant = (hook.message as any).variant || (hook.message.model as any)?.variant;
-      if (variant) output.headers[EFFORT_HEADER] = variant;
-      if (["title", "summary", "compaction"].includes(hook.agent)) output.headers[REQUEST_KIND_HEADER] = hook.agent === "title" ? "title" : "summary";
-    },
-    "chat.params": async (hook, output) => {
-      if (hook.model.providerID !== PROVIDER_ID) return;
-      delete output.options.reasoningEffort;
-      delete output.options.temperature;
-    },
-    provider: {
-      id: PROVIDER_ID,
-      async models() {
-        await startProxy(input.directory);
-        return Object.fromEntries((await refreshModels(input.directory)).map(m => [m.id, {
-          ...configModel(m), id: m.id, providerID: PROVIDER_ID,
-          api: { id: m.id, url: getProxyBaseUrl(), npm: ANTHROPIC_NPM },
-          capabilities: { temperature: false, reasoning: m.efforts.length > 0, attachment: m.nativeInputModalities.some(modality => modality.toLowerCase() === "image"), toolcall: false,
-            input: { text: true, image: m.nativeInputModalities.some(modality => modality.toLowerCase() === "image"), audio: false, video: false, pdf: false },
-            output: { text: true, image: false, audio: false, video: false, pdf: false }, interleaved: true },
-          cost: { input: 0, output: 0, cache: { read: 0, write: 0 } }, status: "active", headers: {}, release_date: m.releaseDate || "",
-        }])) as any;
-      },
-    },
-    auth: { provider: PROVIDER_ID, methods: [{ type: "api", label: "Use Codex CLI login", async authorize() {
-      const rpc = new CodexRpc(input.directory);
-      try {
-        await rpc.initialize();
-        const account = await rpc.request("account/read");
-        if (!account.account && account.requiresOpenaiAuth !== false) return { type: "failed" as const };
-        return { type: "success" as const, key: LOCAL_API_KEY, provider: PROVIDER_ID };
-      } catch { return { type: "failed" as const }; }
-      finally { rpc.close(); }
-    } }] },
-    async dispose() { await stopProxy(input.directory); },
+    limit: { context: model.contextWindow, output: model.maxOutput },
+    time: { released: Number.isFinite(released) ? released : 0 },
+    // Send effort to Codex without enabling Anthropic-specific thinking options.
+    variants: [...new Set(model.efforts)].map(effort => ({
+      id: Model.VariantID.make(effort), headers: { [EFFORT_HEADER]: effort },
+    })),
   };
+}
+
+export const CodexPlugin = {
+  ...Plugin.define({
+    id: "opencode-codex",
+    async setup(ctx) {
+      const directory = ctx.location.directory;
+      try {
+        await startProxy(directory);
+        const models = (await refreshModels(directory)).map(providerModel);
+        await ctx.provider.transform(editor => {
+          editor.add({
+            info: {
+              ...Provider.Info.empty(providerID),
+              name: "Codex",
+              activation: "enabled",
+              package: "@opencode/ai/providers/anthropic-compatible",
+              settings: { baseURL: getProxyBaseUrl(), apiKey: LOCAL_API_KEY },
+            },
+            models,
+          });
+        });
+
+        await ctx.session.hook("model.request", async event => {
+          const session = await ctx.session.get({ sessionID: event.sessionID });
+          event.headers[MODEL_HEADER] = event.model.id;
+          event.headers[DIRECTORY_HEADER] = session.location.directory;
+          event.headers[SESSION_HEADER] = event.sessionID;
+          if (event.model.variant && event.model.variant !== "default") event.headers[EFFORT_HEADER] = event.model.variant;
+          if (event.agent === "plan") event.headers["x-opencode-codex-mode"] = "plan";
+          // V2 has no message ID on request hooks. The proxy hashes the input
+          // transcript to identify retries when this header is absent.
+          if (event.kind !== "primary") {
+            event.headers[REQUEST_KIND_HEADER] = event.kind === "title" ? "title" : "summary";
+          }
+        }, { providerID: PROVIDER_ID });
+
+        return () => stopProxy(directory);
+      } catch (error) {
+        await stopProxy(directory);
+        throw error;
+      }
+    },
+  }),
+  // OpenCode 1.18.29+ supports object entrypoints with a server function.
+  server: legacyPlugin,
 };
+
 export default CodexPlugin;

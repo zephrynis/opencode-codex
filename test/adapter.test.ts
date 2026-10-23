@@ -108,6 +108,29 @@ test("persists thread mapping, replays completed retries and rejects uncertain r
     await rm(dir, { recursive: true, force: true });
   }
 });
+test("v2 retries replay by transcript hash without a message ID", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { runInSession, sessionKey } = await import("../src/session");
+  const dir = await mkdtemp(join(tmpdir(), "codex-v2-retry-test-"));
+  process.env.OPENCODE_CODEX_DATA_DIR = dir;
+  try {
+    const key = sessionKey(process.cwd(), "v2-session");
+    const options = { cwd: process.cwd(), model: "fake-model", prompt: "", messages: [{ role: "user", content: "hello" }] };
+    const first = await Array.fromAsync(runInSession(key, options));
+    process.env.OPENCODE_CODEX_BIN = "/missing-codex-fixture";
+    expect(await Array.fromAsync(runInSession(key, options))).toEqual(first);
+    process.env.OPENCODE_CODEX_BIN = resolve("test/fixtures/fake-codex.mjs");
+    const next = { ...options, messages: [...options.messages, { role: "assistant", content: "Done." }, { role: "user", content: "hello" }] };
+    expect((await Array.fromAsync(runInSession(key, next))).at(-1)?.kind).toBe("finish");
+  } finally {
+    process.env.OPENCODE_CODEX_BIN = resolve("test/fixtures/fake-codex.mjs");
+    delete process.env.OPENCODE_CODEX_DATA_DIR;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("nonstreaming responses retain thinking and reject unsupported media", async () => {
   const headers = { "x-api-key": LOCAL_API_KEY, "content-type": "application/json", "x-opencode-codex-request-kind": "title" };
   const result = await fetch(getProxyBaseUrl() + "/messages", { method: "POST", headers, body: JSON.stringify({ model: "fake-model", messages: [{ role: "user", content: "hello" }] }) });
